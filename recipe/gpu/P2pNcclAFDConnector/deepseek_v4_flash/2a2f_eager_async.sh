@@ -12,7 +12,7 @@
 #   gpu run --gpus 4 -- bash recipe/gpu/P2pNcclAFDConnector/deepseek_v4_flash/2a2f_eager_async.sh
 set -u
 
-MODEL_PATH=${MODEL_PATH:-/data/boao/deepseek-v4-flash}
+MODEL_PATH=${MODEL_PATH:-/path/model_weights/deepseek-v4-flash}
 VLLM_CMD=${VLLM_CMD:-vllm}
 LOG_DIR=${LOG_DIR:-.}
 mkdir -p "$LOG_DIR"

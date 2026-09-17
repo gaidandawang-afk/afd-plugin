@@ -634,7 +634,11 @@ class AFDDeepseekV4Model(native.DeepseekV4Model):
 
     def get_experts_routing_spec(self, layer_idx: int) -> AFDExpertRoutingSpec:
         """Router contract for the async FFN loop's receive buffers."""
-        gate = self.layers[layer_idx].gate
+        # The decoder layer has no gate of its own. On Attention it lives on the
+        # remote-FFN proxy under the checkpoint's own .ffn.gate path, and on FFN
+        # it is the native MoE's gate -- .ffn reaches the right one either way,
+        # which is what the forward path a few hundred lines down already does.
+        gate = self.layers[layer_idx].ffn.gate
         return AFDExpertRoutingSpec(
             router_logits_width=int(self.config.n_routed_experts),
             router_logits_dtype=gate.out_dtype or gate.weight.dtype,
