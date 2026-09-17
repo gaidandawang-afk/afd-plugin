@@ -669,6 +669,8 @@ def _stage_config(*, use_ubatching, num_ubatches=2, extra=None):
         parallel_config=SimpleNamespace(
             use_ubatching=use_ubatching,
             num_ubatches=num_ubatches,
+            # attn_ranks_per_dp must equal this; both default to 1.
+            tensor_parallel_size=1,
         ),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import copy
 from itertools import islice
 from typing import TYPE_CHECKING
@@ -41,24 +42,31 @@ from afd_plugin.v1.worker.dbo import maybe_apply_dbo_yield
 afd_async_dispatch, afd_async_recv = register_async_moe_ops()
 
 
-def _dispatches_through_ops(connector: object) -> bool:
-    """Whether this connector's round trip goes through the opaque ops.
-
-    The ops exist so Dynamo splits at the MoE round trip instead of tracing
-    into the connector, which is the GPU async connector's requirement. CAM
-    keeps the direct calls: the ops carry neither router logits nor FlashComm1
-    token sharding, and the CAM protocol needs both.
-    """
-    from afd_plugin.connectors.gpu.async_gpu import GpuAsyncAFDConnector
-
-    return isinstance(connector, GpuAsyncAFDConnector)
-
-
 if TYPE_CHECKING:
     from afd_plugin.model_executor.models.deepseek_v2 import (
         AFDDeepseekV2DecoderLayer,
         AFDDeepseekV2Model,
     )
+
+
+def build_stage_slot_mapping(
+    slot_mapping: Mapping[str, torch.Tensor],
+    token_slice: slice,
+) -> dict[str, torch.Tensor]:
+    """This ubatch stage's slice of every layer's KV slot mapping.
+
+    KV-cache writes are indexed per token, so a stage's slot mapping is its
+    slice of the batch's. Leaving the full-batch mapping in place makes the
+    attention layer write this stage's rows into the whole batch's slots and
+    corrupt the cache.
+
+    Only the non-sequence-parallel layout calls this. Under sequence
+    parallelism the stage slice is in global coordinates and does not index the
+    rank-local mapping, so that layout keeps the parent's mapping unsliced.
+    """
+    return {
+        layer_name: mapping[token_slice] for layer_name, mapping in slot_mapping.items()
+    }
 
 
 def run_model_forward(
@@ -141,7 +149,12 @@ def run_attention_gate_afd_forward(
     pending_ffn_recv = False
     pending_dispatch_ref: torch.Tensor | None = None
     pending_dispatch_layout: CAMDispatchLayout | None = None
-    use_ops = _dispatches_through_ops(afd_metadata.connector)
+    # Read the capability off the connector, not its type: a subclass of the
+    # GPU connector, or a future async one, would otherwise fall through to the
+    # CAM direct path and silently lose the graph split it asked for. CAM keeps
+    # the direct calls -- the ops carry neither router logits nor FlashComm1
+    # token sharding, and the CAM protocol needs both.
+    use_ops = afd_metadata.connector.uses_opaque_moe_ops
 
     # Async CAM profile forwards are a distributed startup contract: every
     # Attention rank pairs CAM I/O with the FFN daemon to initialize resources.
@@ -374,16 +387,10 @@ def run_async_moe_ubatch_afd_forward(
         else:
             stage_forward_context.num_tokens = int(stage.input_tokens)
             stage_forward_context.pad_size = 0
-            # KV-cache writes are indexed per token, so a stage's slot mapping
-            # is its slice of the batch's. Leaving the full-batch mapping in
-            # place makes the attention layer write this stage's rows into the
-            # whole batch's slots and corrupt the cache. Under sequence
-            # parallelism the stage slice is in global coordinates and does not
-            # index the rank-local mapping, so that layout keeps the parent's.
-            stage_forward_context.slot_mapping = {
-                layer_name: mapping[stage.token_slice]
-                for layer_name, mapping in forward_context.slot_mapping.items()
-            }
+            stage_forward_context.slot_mapping = build_stage_slot_mapping(
+                forward_context.slot_mapping,
+                stage.token_slice,
+            )
         expected_tokens = int(stage_hidden_states[stage_idx].shape[0])
         log_async_moe_stage_attention(
             stage_idx,
@@ -561,8 +568,12 @@ def _restore_async_moe_stage_state(
         dim=-1,
     )
     # Splitting the last dimension leaves two interleaved views. The next thing
-    # to touch them is the final norm, and CUDA's fused_add_rms_norm requires
-    # contiguous inputs -- it aborts in the kernel rather than falling back.
+    # to touch them is the final norm, and the fused add-RMSNorm kernel requires
+    # contiguous inputs on both backends -- it aborts in the kernel rather than
+    # falling back. The copy is not avoidable by ordering: a split along the
+    # last dimension is never contiguous, so the alternative is not a cheaper
+    # copy but a correctness bug. It is one pass over the final hidden state per
+    # forward, not per layer.
     return hidden_states.contiguous(), residual.contiguous()
 
 

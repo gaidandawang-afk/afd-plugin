@@ -320,6 +320,20 @@ def validate_afd_config(
             "AFD async mode requires one of "
             f"{sorted(AFD_ASYNC_CONNECTORS)!r}, got {config.connector!r}",
         )
+    if config.connector == AFD_ASYNC_GPU_CONNECTOR:
+        # Both of these are structural, not preferences. FFN steps come off the
+        # connector receive loop, which only the async-DP engine patches drive,
+        # and the wire carries topk chosen on the Attention side, so there is no
+        # FFN-side router to fall back on. Reject the combinations here rather
+        # than as a startup hang or a missing-gate crash mid-run.
+        if not config.async_dp:
+            raise ValueError(
+                f"{AFD_ASYNC_GPU_CONNECTOR} requires async=true",
+            )
+        if not config.compute_gate_on_attention:
+            raise ValueError(
+                f"{AFD_ASYNC_GPU_CONNECTOR} requires compute_gate_on_attention=true",
+            )
     if config.connector == "P2pNcclAFDConnector":
         from afd_plugin.distributed import validate_p2p_topology
 

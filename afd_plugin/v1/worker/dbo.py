@@ -27,7 +27,11 @@ try:
     from afd_plugin.v1.worker.npu.ubatching import (
         dbo_yield as _ascend_dbo_yield,
     )
-except ImportError:  # not an Ascend build
+except Exception:  # noqa: BLE001 -- not an Ascend build, or a broken one
+    # ImportError is the ordinary case on a CUDA build. Anything else means the
+    # Ascend module is present but failed while importing, and letting that
+    # escape would take `import afd_plugin.v1.worker.dbo` down with it -- on
+    # every platform, for a yield that only the Ascend path ever calls.
     _ascend_dbo_enabled = None
     _ascend_dbo_yield = None
 

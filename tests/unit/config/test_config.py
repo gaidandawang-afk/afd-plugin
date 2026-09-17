@@ -135,21 +135,55 @@ def test_async_dp_requires_async_connector():
 
 
 @pytest.mark.parametrize(
-    "connector",
-    ["CAMAsyncAFDConnector", "GpuAsyncAFDConnector"],
+    ("connector", "extra"),
+    [
+        ("CAMAsyncAFDConnector", {}),
+        # The GPU connector has no FFN-side router, so the gate is not optional.
+        ("GpuAsyncAFDConnector", {"compute_gate_on_attention": True}),
+    ],
 )
-def test_async_dp_accepts_every_async_connector(connector):
+def test_async_dp_accepts_every_async_connector(connector, extra):
     config = parse_afd_config(
         {
             "afd": {
                 "connector": connector,
                 "role": "attention",
                 "async": True,
+                **extra,
             },
         },
     )
     assert config.connector == connector
     assert config.async_dp
+
+
+@pytest.mark.parametrize(
+    ("afd", "expected"),
+    [
+        (
+            {"async": False, "compute_gate_on_attention": True},
+            "requires async=true",
+        ),
+        (
+            {"async": True, "compute_gate_on_attention": False},
+            "requires compute_gate_on_attention=true",
+        ),
+    ],
+)
+def test_gpu_async_rejects_the_combinations_it_cannot_run(afd, expected):
+    # Both are structural: FFN steps come off the connector receive loop, which
+    # only the async-DP patches drive, and topk is chosen on the Attention side.
+    # Without this the failure is a startup hang or a missing-gate crash.
+    with pytest.raises(ValueError, match=expected):
+        parse_afd_config(
+            {
+                "afd": {
+                    "connector": "GpuAsyncAFDConnector",
+                    "role": "attention",
+                    **afd,
+                },
+            },
+        )
 
 
 def test_original_common_afd_field_aliases_are_supported():

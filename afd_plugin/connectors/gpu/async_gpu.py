@@ -24,14 +24,16 @@ because a captured stream wait can only ever compare against the value that was
 live when it was recorded. The FFN side is driven by a host poll loop and stays
 eager, so nothing there needs capturing.
 
-See ``docs/design/rfc_async_gpu_connector.md``. Supported deployment requires
-``async=true``, ``compute_gate_on_attention=true``, and a single node.
+See the async-GPU rows in ``docs/design/module/connector_contracts.md``.
+Supported deployment requires ``async=true``,
+``compute_gate_on_attention=true``, and a single node; the first two are
+enforced in ``validate_afd_config``.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
@@ -375,6 +377,10 @@ class GpuAsyncAFDConnector(AFDConnectorBase):
     """NVSHMEM symmetric-window asynchronous connector for CUDA AFD."""
 
     control_plane = None
+    # Dynamo must split the graph at the MoE round trip instead of tracing into
+    # the connector, so this connector's dispatch and receive go through the
+    # opaque ops.
+    uses_opaque_moe_ops = True
 
     # The base builds this in __init__ from parse_extra_config; the narrowed
     # annotation is what lets mypy see the async connector's own fields.
@@ -406,7 +412,20 @@ class GpuAsyncAFDConnector(AFDConnectorBase):
         self.has_shared_experts = bool(hf_config.n_shared_experts)
         self.payload_dtype = vllm_config.model_config.dtype
         self.max_seq_len = vllm_config.scheduler_config.max_num_batched_tokens
+        # attn_ranks_per_dp is how the connector shards an Attention replica,
+        # and vLLM's tensor_parallel_size is how the model is sharded. They name
+        # the same split, so a mismatch sends dispatches sized for one world
+        # into ranks laid out for the other. The NPU twin enforces this in
+        # feature_validation; do it here, where both numbers first meet.
         self.tp_size = self.extra_info.attn_ranks_per_dp
+        if afd_config.role == "attention":
+            tensor_parallel_size = int(vllm_config.parallel_config.tensor_parallel_size)
+            if self.tp_size != tensor_parallel_size:
+                raise ValueError(
+                    "AFD async GPU attn_ranks_per_dp must equal Attention "
+                    f"tensor_parallel_size, got attn_ranks_per_dp={self.tp_size} "
+                    f"and tensor_parallel_size={tensor_parallel_size}",
+                )
 
         self.topology = build_async_topology(
             afd_config,
@@ -573,6 +592,17 @@ class GpuAsyncAFDConnector(AFDConnectorBase):
 
             dist.destroy_process_group(self.pg)
         self.pg = None
+        # Teardown ordering: an Attention rank drains its pending combines
+        # before the FFN world closes. Dropping them here is the last resort --
+        # the rows are gone, and only the FFN side's shutdown release keeps the
+        # waiter from hanging -- so say so rather than clearing in silence.
+        outstanding = sum(len(queue) for queue in self._pending.values())
+        if outstanding:
+            logger.warning(
+                "AFD async GPU closing with %d un-combined dispatch(es); "
+                "their FFN replies are discarded",
+                outstanding,
+            )
         self._pending.clear()
         self._free_rings.clear()
         self._header_device.clear()
@@ -1262,6 +1292,41 @@ class GpuAsyncAFDConnector(AFDConnectorBase):
                 shared_x=None,
                 flag_value=self._seq_device,
             )
+        if not self.is_attention:
+            self._release_outstanding_replies(window, peers)
+
+    def _release_outstanding_replies(
+        self,
+        window: SymmWindow,
+        peers: Iterable[int],
+    ) -> None:
+        """Free any Attention rank waiting on a reply this rank will not send.
+
+        A combine wait is released only by ``FLAG_REPLY_READY`` landing on this
+        rank's region, so an FFN rank that leaves between a dispatch and its
+        reply strands its waiter forever -- and the waiter may be stranded
+        inside a graph replay, where no Python runs to notice the shutdown that
+        was just announced. Stamping the flag on every ring frees it.
+
+        Re-stamping a ring that was already answered is harmless: the reply flag
+        is a constant, so the second write writes the value already there. A
+        ring that was never answered releases its waiter over a stale payload,
+        which is the right trade at teardown -- the numbers are discarded on the
+        way out, and the alternative is a rank that never exits.
+        """
+        for peer in peers:
+            for ring in range(self.ring_depth):
+                window.write_slot(
+                    peer=peer,
+                    region=self.role_rank,
+                    ring=ring,
+                    header=None,
+                    expand_idx=None,
+                    weights=None,
+                    routed_x=None,
+                    shared_x=None,
+                    flag_value=FLAG_REPLY_READY,
+                )
 
 
 __all__ = [
