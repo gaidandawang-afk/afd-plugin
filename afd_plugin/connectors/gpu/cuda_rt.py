@@ -28,6 +28,12 @@ CU_STREAM_WAIT_VALUE_EQ: Final[int] = 0x1
 # CUdevice_attribute: stream memory ops must be supported by the device.
 _CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_MEM_OPS: Final[int] = 74
 
+# The CUDA driver library is process-global, and so is what this module caches
+# about it: one ctypes handle, the entry point this driver happens to export,
+# and the devices already known to support stream memory ops. Resolving any of
+# it per call would repeat a dlopen and an attribute probe on the layer path,
+# which is exactly the host cost this module exists to remove. ``nvshmem_rt``
+# holds its world handle for the same reason.
 _lib: ctypes.CDLL | None = None
 _wait_value32 = None
 _checked_devices: set[int] = set()

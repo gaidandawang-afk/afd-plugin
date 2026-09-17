@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from afd_plugin.connectors.gpu import cuda_rt, nvshmem_rt
 
@@ -325,6 +326,15 @@ class SymmWindow:
         self._flag_bytes = _align(self.num_flags * 4)
         self.total_bytes = self._flag_bytes + self.num_flags * layout.slot_bytes
 
+        # A sender writes into a peer's window using its own idea of the slot
+        # geometry, and the receiver only ever checks magic and version -- so a
+        # configuration difference between the two role deployments is invisible
+        # at the wire. Unequal heaps fault inside the transport; equal heaps with
+        # different field offsets read a header out of the wrong words, and a
+        # smaller capacity silently clamps a partial read. Compare the geometry
+        # once, here, where the parameter that differs can still be named.
+        self._validate_uniform_geometry(group, world_size)
+
         nvshmem_rt.init(group, rank, world_size)
         self._base = nvshmem_rt.malloc(self.total_bytes)
         # Peer mappings are stable for the life of the allocation, so resolve
@@ -334,6 +344,14 @@ class SymmWindow:
             for pe in range(world_size)
         }
         self.local_bytes_view().zero_()
+        torch.cuda.synchronize()
+        # The collective malloc orders the allocation, not this reset. A peer
+        # that returned from its own malloc first can already be writing its
+        # first dispatch into this window while the zero above is still queued,
+        # and the zero would erase the arriving flag -- leaving that peer
+        # waiting on a reply for a slot this rank never saw. Nobody may write
+        # until every rank has finished resetting, so hold the group here.
+        dist.barrier(group=group)
         torch.cuda.synchronize()
 
         # The layout is static, so every window view is built once and then
@@ -371,6 +389,52 @@ class SymmWindow:
         # every receive against the compute it is supposed to overlap with.
         self._poll_stream = torch.cuda.Stream(device=device)
         self._warm_views()
+
+    def _validate_uniform_geometry(
+        self,
+        group: ProcessGroup,
+        world_size: int,
+    ) -> None:
+        """Raise unless every rank in the group agrees on the slot geometry.
+
+        Named in field order so the error can point at the one parameter that
+        differs rather than at a byte count nobody configured directly.
+        """
+        layout = self.layout
+        mine = {
+            "num_regions": self.num_regions,
+            "ring_depth": self.ring_depth,
+            "header_words": layout.header_words,
+            "partial_cap": layout.partial_cap,
+            "token_cap": layout.token_cap,
+            "shared_cap": layout.shared_cap,
+            "hidden_size": layout.hidden_size,
+            "payload_itemsize": layout.payload_itemsize,
+            "slot_bytes": layout.slot_bytes,
+            "total_bytes": self.total_bytes,
+        }
+        names = tuple(mine)
+        local = torch.tensor(
+            [mine[name] for name in names],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        gathered = torch.empty(
+            (world_size, local.numel()),
+            dtype=torch.int64,
+            device=self.device,
+        )
+        dist.all_gather_into_tensor(gathered, local, group=group)
+        rows = gathered.cpu()
+        for column, name in enumerate(names):
+            values = rows[:, column].tolist()
+            if len(set(values)) == 1:
+                continue
+            raise ValueError(
+                f"AFD symmetric window {name} differs across the group: "
+                f"rank {self.rank} has {mine[name]}, group has {values}. "
+                "Both roles must be launched with the same window geometry.",
+            )
 
     def _warm_views(self) -> None:
         """Import every window pointer now, so the data path never does.
