@@ -1,7 +1,7 @@
 # Elastic AFD implementation validation — 2026-09-21
 
-CPU checks and initial GPU startup passed. Elastic resize acceptance remains
-pending.
+CPU checks, initial GPU startup and one eager F-only shrink/expand cycle
+passed. A resizing and broader elastic acceptance remain pending.
 
 ## Source review
 
@@ -98,12 +98,52 @@ The sibling `afd_agent` project retains the report and raw evidence under
 `artifacts/startup004/output/`. This was a short startup/inference check;
 no resize request or accuracy benchmark was run.
 
+## GPU F-only resize — passed
+
+On 2026-09-21, run `elastic-ffn-20260921.resize001.1789982600668499500`
+verified commit `78b463872538c25b32abe61a49c526e214ac3d27` on GPUs 4–7.
+The model/runtime and eager TP=1 settings matched the startup check above;
+the initial F DP size was 2. No product code change was needed for this run.
+
+The same service executed `2A2F → 2A1F → 2A2F` sequentially. Both calls used
+`POST /scale_elastic_ep` with `role=ffn`, `drain_timeout=300`, and target DP
+sizes 1 and 2. Each returned HTTP 200, followed by a scaling-status response
+of false. Durations below are client-observed HTTP wall time, including
+reconfiguration/reload/warmup, not a separately instrumented pause duration.
+
+| Stage | Resize API time | Completion time | Result |
+| --- | --- | --- | --- |
+| Initial 2A2F | — | 1.845 s | HTTP 200, 16 generated tokens |
+| Shrink to 2A1F | 17.644 s | 1.567 s | HTTP 200, 16 generated tokens |
+| Expand to 2A2F | 28.024 s | 0.991 s | HTTP 200, 16 generated tokens |
+
+- Both A actor IDs and container PIDs (2371808, 2371809) remained unchanged,
+  as did their Ray placement groups.
+- Shrink retained F PID 2372702, marked F PID 2372703 DEAD and its placement
+  group REMOVED. Expansion retained 2372702 and added F PID 2373630 with a
+  new CREATED placement group. Snapshots showed alive F counts 2 → 1 → 2.
+- Logs showed F role/group reconstruction and checkpoint loading. All three
+  fixed requests (`temperature=0`, `seed=0`, `max_tokens=16`) produced the
+  same text beginning ` Paris.`. The test required nonempty completions,
+  not bitwise equality; this is not an independent accuracy oracle or proof
+  that every expert was exercised.
+- GPU 7 memory returned to its preflight level after shrink, then increased
+  when the new F actor was created. After final task cleanup, all four cards
+  returned to their recorded preflight memory levels. The owned-process
+  cleanup inventory was empty; existing workloads were retained.
+
+All three stage assertions and the runner passed (exit 0). Raw API responses,
+GCS actor/placement snapshots, GPU observations and logs are retained in the
+sibling `afd_agent` project's
+`work/elastic-ffn-20260921/artifacts/resize001/output/`. This was one functional
+cycle with requests between resizes, not concurrent traffic, repeated-cycle
+stress, a peak-memory measurement, or an accuracy benchmark.
+
 ## Unverified / not implemented
 
-- Repeated NCCL rendezvous and Ray resource assignment after resizing.
-- Eager inference after all four A/F resize directions; new-A request
-  distribution and F expert coverage.
-- Accuracy, peak memory, group/actor cleanup across resizes and pause duration.
+- A shrink/expand and new-A request distribution; the complete mixed A/F chain.
+- Long-running repeated resizing, concurrent-traffic drain and F expert coverage.
+- Accuracy, peak memory, communication-group leak checks and exact pause duration.
 - CUDA graph capture/replay after role changes.
 - NPU EEP stateless HCCL qualification and NPU elastic implementation.
 

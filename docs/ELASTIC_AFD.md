@@ -2,10 +2,12 @@
 
 This implements the GPU TP=1 path of the EEP-reuse design against vLLM
 **0.26.0 / 568afb3a13806beb53bb2e6bd518269357b237c0** and afd-plugin
-**8bb14be66d9f940b1b132b141d986214c0210353**. CPU tests and source review pass;
-commit **00c03bbe** also passed initial **2A1F eager startup and one real
-completion on H20**. A/F resizing and CUDA graphs have not been validated on
-hardware. The example below remains a candidate for that broader acceptance.
+**8bb14be66d9f940b1b132b141d986214c0210353**. CPU tests and source review pass.
+On H20, commit **00c03bbe** passed initial **2A1F eager startup and a real
+completion**, and **78b4638** passed **2A2F → 2A1F → 2A2F F-only resizing**
+with real completions at all three stages. A resizing, accuracy qualification
+and CUDA graphs remain unverified. The example below remains a candidate for
+that broader acceptance.
 
 ## Implemented flow
 
@@ -45,8 +47,9 @@ the `uni` role executor separately. DBO, speculative decoding, LoRA, sleep,
 KV transfer and KV retention are outside this build. KV memory is fixed
 explicitly. Model/precision qualification starts with DeepSeek-V2-Lite.
 
-Graph-release/recapture code is included. Initial eager 2A1F inference passed;
-eager resizing and CUDA graph execution still need hardware qualification.
+Graph-release/recapture code is included. Initial eager 2A1F inference and one
+eager F shrink/expand cycle passed; A resizing and CUDA graph execution still
+need hardware qualification.
 
 **Ascend is not implemented as an elastic backend in this build.** Static NPU
 AFD remains available. Elastic configuration fails early with the stateless
@@ -118,6 +121,13 @@ arguments restored `AFDConfig` as a dictionary. The client now sends a plain
 mapping on both A/F paths, and workers restore it with the existing validated
 config parser. The fix has real MessagePack regression coverage and passed
 the H20 startup/completion check. See [ELASTIC_AFD_VALIDATION.md](ELASTIC_AFD_VALIDATION.md).
+
+The subsequent F-only run kept both A actor IDs/PIDs and their placements
+unchanged, removed one F actor/placement on shrink, and created a new F
+actor/placement on expansion. Both resize calls returned HTTP 200, followed
+by `is_scaling_elastic_ep=false` and a successful completion. The measured
+API durations were 17.644 s and 28.024 s, including model reload and warmup.
+This is one eager functional smoke cycle, not a latency or accuracy benchmark.
 
 Hardware acceptance still requires:
 
