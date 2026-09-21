@@ -2,9 +2,10 @@
 
 This implements the GPU TP=1 path of the EEP-reuse design against vLLM
 **0.26.0 / 568afb3a13806beb53bb2e6bd518269357b237c0** and afd-plugin
-**8bb14be66d9f940b1b132b141d986214c0210353**. It has CPU unit coverage and
-source review; it has **not yet been validated on GPUs**. Do not treat the
-example below as a qualified deployment recipe.
+**8bb14be66d9f940b1b132b141d986214c0210353**. CPU tests and source review pass;
+commit **00c03bbe** also passed initial **2A1F eager startup and one real
+completion on H20**. A/F resizing and CUDA graphs have not been validated on
+hardware. The example below remains a candidate for that broader acceptance.
 
 ## Implemented flow
 
@@ -44,8 +45,8 @@ the `uni` role executor separately. DBO, speculative decoding, LoRA, sleep,
 KV transfer and KV retention are outside this build. KV memory is fixed
 explicitly. Model/precision qualification starts with DeepSeek-V2-Lite.
 
-Graph-release/recapture code is included, but neither eager nor CUDA graph
-execution is hardware-qualified yet. Start validation in eager mode.
+Graph-release/recapture code is included. Initial eager 2A1F inference passed;
+eager resizing and CUDA graph execution still need hardware qualification.
 
 **Ascend is not implemented as an elastic backend in this build.** Static NPU
 AFD remains available. Elastic configuration fails early with the stateless
@@ -111,6 +112,12 @@ CPU tests are in `tests/unit/elastic`. They cover real orchestration methods
 with device/actor doubles, API routing, the gate and drain boundary, STOP wire
 compatibility, workspace/KV ordering, and the zero-new-remote actor regression.
 These tests cannot establish NCCL progress, model accuracy or memory safety.
+
+The first hardware startup found a MessagePack boundary bug: nested worker RPC
+arguments restored `AFDConfig` as a dictionary. The client now sends a plain
+mapping on both A/F paths, and workers restore it with the existing validated
+config parser. The fix has real MessagePack regression coverage and passed
+the H20 startup/completion check. See [ELASTIC_AFD_VALIDATION.md](ELASTIC_AFD_VALIDATION.md).
 
 Hardware acceptance still requires:
 
