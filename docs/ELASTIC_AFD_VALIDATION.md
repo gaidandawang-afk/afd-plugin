@@ -1,7 +1,7 @@
 # Elastic AFD implementation validation — 2026-09-21
 
-CPU checks, initial GPU startup and one eager F-only shrink/expand cycle
-passed. A resizing and broader elastic acceptance remain pending.
+CPU checks, initial GPU startup and separate eager A-only and F-only
+shrink/expand cycles passed. Broader elastic acceptance remains pending.
 
 ## Source review
 
@@ -139,9 +139,57 @@ sibling `afd_agent` project's
 cycle with requests between resizes, not concurrent traffic, repeated-cycle
 stress, a peak-memory measurement, or an accuracy benchmark.
 
+## GPU A-only resize — passed
+
+Run `elastic-attention-20260921.resize002.1789984248908461000` verified
+commit `130346bb3f27204a911257c49b865ef464cf5754` with GPUs 0–7 available
+to the isolated Ray cluster. The same model/runtime and eager TP=1 settings
+were used, starting with 4 A and 2 F. No product code change was needed.
+
+The same service executed `4A2F → 2A2F → 4A2F`. Calls to
+`POST /scale_elastic_ep` omitted `role` (the default is attention), with
+target sizes 2 and 4 and `drain_timeout=300`. Both returned HTTP 200 and
+subsequent scaling status was false. Client-observed API wall times were
+19.426 s for shrink and 53.904 s for expansion, including reconstruction
+and warmup; these are single-run observations on shared GPUs.
+
+| Stage | Successful requests | Per-A request-success counter increase |
+| --- | --- | --- |
+| Initial 4A2F | 16/16 | 4, 4, 4, 4 |
+| Shrink to 2A2F | 16/16 | 8, 8; removed ranks unchanged |
+| Expand to 4A2F | 16/16 | 4, 4, 4, 4 |
+
+Each phase sent 16 concurrent fixed requests with `temperature=0`, `seed=0`,
+and `max_tokens=64`; all returned HTTP 200, nonempty text and 64 generated
+tokens. Before/after `/metrics` snapshots establish that the newly added
+A ranks 2 and 3 also completed requests. Counters were compared within each
+phase, since native scale-up recreated the API's metric logger counters.
+
+A PIDs 2384333/2384334 persisted. Shrink removed 2384335/2384336 and their
+two placement groups; expansion created 2386869/2386870 with new groups.
+F PIDs 2385838/2385839, actor IDs and placement groups remained unchanged.
+Native EEP logs recorded reconfiguration and checkpoint reload. Scale success
+passes the product's all-engine `afd_eep_complete` barrier; no independent
+external sampling of EngineCore state was added.
+
+The prior `resize001` passed initial/shrink inference but failed expansion:
+native `add_dp_placement_groups()` uses `ray.util.state.list_nodes()`, which
+requires the Ray Dashboard HTTP service. The harness had disabled it.
+`resize002` enabled Dashboard on loopback port 6129 and verified `list_nodes()`
+before model startup. The product commit was unchanged; both runs' evidence
+is retained. Both were cleaned up by exact task ownership.
+
+The successful runner exited 0. The owned-process inventory and independent
+cleanup check were empty, ports were released and all eight cards returned
+to this run's preflight memory levels. Original workloads were retained.
+Raw results are under the sibling `afd_agent` project's
+`work/elastic-attention-20260921/artifacts/resize002/output/`; the failed
+run is under `artifacts/resize001/`. This establishes functional eager
+A scaling and inference, not accuracy or availability during resizing.
+
 ## Unverified / not implemented
 
-- A shrink/expand and new-A request distribution; the complete mixed A/F chain.
+- The complete mixed A/F chain in one service lifetime.
 - Long-running repeated resizing, concurrent-traffic drain and F expert coverage.
 - Accuracy, peak memory, communication-group leak checks and exact pause duration.
 - CUDA graph capture/replay after role changes.

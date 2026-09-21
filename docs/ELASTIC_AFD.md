@@ -5,9 +5,10 @@ This implements the GPU TP=1 path of the EEP-reuse design against vLLM
 **8bb14be66d9f940b1b132b141d986214c0210353**. CPU tests and source review pass.
 On H20, commit **00c03bbe** passed initial **2A1F eager startup and a real
 completion**, and **78b4638** passed **2A2F → 2A1F → 2A2F F-only resizing**
-with real completions at all three stages. A resizing, accuracy qualification
-and CUDA graphs remain unverified. The example below remains a candidate for
-that broader acceptance.
+with real completions at all three stages. Commit **130346b** also passed
+**4A2F → 2A2F → 4A2F A-only resizing**, including requests completed by the
+new A ranks. Accuracy qualification, CUDA graphs and the full mixed-role
+sequence remain unverified.
 
 ## Implemented flow
 
@@ -47,9 +48,9 @@ the `uni` role executor separately. DBO, speculative decoding, LoRA, sleep,
 KV transfer and KV retention are outside this build. KV memory is fixed
 explicitly. Model/precision qualification starts with DeepSeek-V2-Lite.
 
-Graph-release/recapture code is included. Initial eager 2A1F inference and one
-eager F shrink/expand cycle passed; A resizing and CUDA graph execution still
-need hardware qualification.
+Graph-release/recapture code is included. Initial eager 2A1F inference and
+separate eager A/F shrink/expand cycles passed. CUDA graph execution still
+needs hardware qualification.
 
 **Ascend is not implemented as an elastic backend in this build.** Static NPU
 AFD remains available. Elastic configuration fails early with the stateless
@@ -66,6 +67,11 @@ a service restart; this build makes no failure-availability guarantee.
 ## Candidate launch on an isolated Ray GPU cluster
 
 Install the pinned vLLM runtime and this plugin checkout on every Ray node.
+Enable Ray's Dashboard HTTP service: native EEP scale-up calls
+`ray.util.state.list_nodes()`. On a single node, bind it to loopback and an
+explicit free port, then verify `list_nodes()` before starting the model.
+The A scale-up validation failed with `--include-dashboard=false` and passed
+after enabling that service, without a product code change.
 The complete candidate sequence peaks at six available GPUs (4 A + 2 F).
 The initial topology needs three. Use the same model checkpoint on each node.
 The code uses the actual GPU assigned to each Ray placement, including A
@@ -129,13 +135,19 @@ by `is_scaling_elastic_ep=false` and a successful completion. The measured
 API durations were 17.644 s and 28.024 s, including model reload and warmup.
 This is one eager functional smoke cycle, not a latency or accuracy benchmark.
 
+The A-only run issued 16 concurrent fixed requests after each topology was
+ready. All 48 succeeded. Per-engine request-success counters increased by
+4/4/4/4, then 8/8, then 4/4/4/4, demonstrating that both newly added A ranks
+processed requests. The two F actors retained their identities throughout.
+The run did not send requests during either resize.
+
 Hardware acceptance still requires:
 
 1. Static AFD and native EEP baselines on the chosen model/runtime.
 2. Initial 2A1F construction without premature forward; same-topology STOP and
    restart; then the full `2A1F → 4A1F → 4A2F → 2A2F → 2A1F` chain.
-3. Per-engine counters proving new A receive requests, and F expert/weight
-   coverage checks (actor counts alone are insufficient).
+3. Request distribution checks across the mixed-role sequence, and F
+   expert/weight coverage checks (actor counts alone are insufficient).
 4. Fixed request/accuracy comparison against each topology's static baseline,
    plus memory/placement/process-group cleanup measurements.
 5. CUDA graph recapture after eager passes. NPU N0 and implementation are
