@@ -41,6 +41,7 @@ from afd_plugin.connectors import (
     AFDConnectorFactory,
     AFDForwardContextMetadata,
 )
+from afd_plugin.elastic.config import is_elastic_attention
 from afd_plugin.model_executor.models.forward_context import use_afd_metadata_provider
 from afd_plugin.v1.worker.attention_metadata import (
     AFDMetadataProviderMixin,
@@ -110,8 +111,13 @@ class AFDAttentionModelRunner(AFDMetadataProviderMixin, GPUModelRunner):
         # rendezvous is the blocking cross-role collective, so it is
         # deliberately last: it doubles as the "both roles finished loading
         # weights" barrier before memory profiling.
-        if not self.connector.is_initialized:
+        # ### PATCH START: EEP workers connect after both roles are prepared.
+        if (
+            not is_elastic_attention(self.vllm_config)
+            and not self.connector.is_initialized
+        ):
             self.connector.init_afd_connector()
+        # ### PATCH END: EEP workers connect after both roles are prepared.
 
     def _install_afd_ubatch_wrapper(self) -> None:
         if isinstance(self.model, AFDUBatchWrapper):
