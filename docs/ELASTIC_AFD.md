@@ -7,8 +7,9 @@ On H20, commit **00c03bbe** passed initial **2A1F eager startup and a real
 completion**, and **78b4638** passed **2A2F → 2A1F → 2A2F F-only resizing**
 with real completions at all three stages. Commit **130346b** also passed
 **4A2F → 2A2F → 4A2F A-only resizing**, including requests completed by the
-new A ranks. Accuracy qualification, CUDA graphs and the full mixed-role
-sequence remain unverified.
+new A ranks. Commit **03c87ad** passed the four-GPU mixed-role CUDA graph
+cycle **2A2F → 2A1F → 3A1F → 2A1F → 2A2F**, including real-request graph
+replay on every A at each stage. Accuracy qualification remains pending.
 
 ## Implemented flow
 
@@ -48,9 +49,11 @@ the `uni` role executor separately. DBO, speculative decoding, LoRA, sleep,
 KV transfer and KV retention are outside this build. KV memory is fixed
 explicitly. Model/precision qualification starts with DeepSeek-V2-Lite.
 
-Graph-release/recapture code is included. Initial eager 2A1F inference and
-separate eager A/F shrink/expand cycles passed. CUDA graph execution still
-needs hardware qualification.
+Initial eager 2A1F inference, separate eager A/F shrink/expand cycles and
+the four-GPU mixed-role CUDA graph cycle passed. The graph qualification
+uses `FULL_DECODE_ONLY`, compilation mode 0, capture sizes 1/2/4/8/16 and
+the launch settings below. It does not qualify other compilation modes,
+all capture sizes' replay, model accuracy or repeated-cycle stability.
 
 **Ascend is not implemented as an elastic backend in this build.** Static NPU
 AFD remains available. Elastic configuration fails early with the stateless
@@ -166,17 +169,25 @@ ready. All 48 succeeded. Per-engine request-success counters increased by
 processed requests. The two F actors retained their identities throughout.
 The run did not send requests during either resize.
 
-Hardware acceptance still requires:
+The four-GPU graph run issued 16 concurrent requests at each of five stages;
+all 80 succeeded. Test-only worker extensions observed successful captures,
+actual graph replay inside each A's real-request `execute_model` (excluding
+dummy batches), F replay during the request window, and retirement of each
+retained worker's old graphs before new capture. The A=3 stage completed
+6/5/5 requests across the three engines, including the newly added A.
+This was one cycle with requests between resizes. See the validation record
+for exact configuration, sampled memory and evidence boundaries.
 
-1. Static AFD and native EEP baselines on the chosen model/runtime.
-2. Initial 2A1F construction without premature forward; same-topology STOP and
-   restart; then the full `2A1F → 4A1F → 4A2F → 2A2F → 2A1F` chain.
-3. Request distribution checks across the mixed-role sequence, and F
-   expert/weight coverage checks (actor counts alone are insufficient).
-4. Fixed request/accuracy comparison against each topology's static baseline,
-   plus memory/placement/process-group cleanup measurements.
-5. CUDA graph recapture after eager passes. NPU N0 and implementation are
-   separate remaining work, not covered by GPU results.
+Further hardware qualification requires:
+
+1. Fixed request/accuracy comparison against static AFD and native EEP baselines
+   on the chosen model/runtime; F expert/weight coverage checks.
+2. Same-topology STOP/restart and the larger
+   `2A1F → 4A1F → 4A2F → 2A2F → 2A1F` mixed-role chain.
+3. Repeated resizing, concurrent-traffic drain, and long-lived memory and
+   communication-group leak checks.
+4. Other graph capture sizes and compilation mode 3.
+5. NPU N0 and implementation, which are not covered by GPU results.
 
 The compatibility patches record their pinned source and AFD differences.
 Source review closed two concrete bugs: workspace reset on A runner reload,

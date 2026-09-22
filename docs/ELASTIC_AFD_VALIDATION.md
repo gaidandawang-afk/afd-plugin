@@ -1,7 +1,8 @@
-# Elastic AFD implementation validation — 2026-09-21
+# Elastic AFD implementation validation — 2026-09-21–22
 
-CPU checks, initial GPU startup and separate eager A-only and F-only
-shrink/expand cycles passed. Broader elastic acceptance remains pending.
+CPU checks, initial GPU startup, separate eager A-only and F-only cycles,
+and one mixed-role CUDA graph cycle passed. Broader elastic acceptance
+remains pending.
 
 ## Source review
 
@@ -46,6 +47,13 @@ python -X utf8 -m pytest tests/unit/elastic \
 Result: **129 passed, 15 skipped**, including **54 new elastic tests**. The
 15 skipped tests require the unavailable vLLM runtime. Two deprecation
 warnings come from the local FastAPI/Starlette test client dependencies.
+
+The 2026-09-22 graph configuration change (`90ef183`) additionally ran
+`tests/unit/v1/worker/test_cuda_graph.py` with the command above:
+**153 passed, 15 skipped**. Added elastic checks accept `FULL_DECODE_ONLY`
+with compilation modes 0 and 3, reject unsupported graph modes, and reject
+`STOCK_TORCH_COMPILE`, whose MRV1 loader bypasses the A full-graph wrapper.
+Changed Python files passed Ruff check/format and `git diff --check`.
 
 The new elastic tests exercise production orchestration/patch methods with
 upstream and device doubles. Metadata STOP round-tripping uses the production
@@ -187,12 +195,97 @@ Raw results are under the sibling `afd_agent` project's
 run is under `artifacts/resize001/`. This establishes functional eager
 A scaling and inference, not accuracy or availability during resizing.
 
+## GPU mixed-role CUDA graph cycle — passed
+
+On 2026-09-22, run
+`elastic-graph-20260922.graph001.1790043070249727000` verified commit
+`03c87ad533fbaf91cfde0ecf81701f7d08c5afa4` (product Python unchanged from
+`90ef183`) on **GPUs 4–7 only**, with a half-card memory allowance.
+The runtime/model matched the eager runs: H20, DeepSeek-V2-Lite-Chat BF16,
+vLLM 0.26.0, torch 2.11.0+cu130, Ray 2.48.0, MRV1, TP=1, EP enabled,
+EPLB disabled, fixed 1 GiB KV and GPU utilization 0.35.
+
+The service omitted `--enforce-eager` and explicitly used compilation
+mode **0**, `FULL_DECODE_ONLY`, capture sizes **[1,2,4,8,16]**, max capture
+16, max sequences 16 and max batched tokens 2048. Compilation mode 0
+disables `torch.compile`, while retaining CUDA graph capture/replay.
+Prefill remains eager. Ray Dashboard HTTP and its `list_nodes()` check
+were enabled before model startup.
+
+| Stage | Resize API wall time | Successful requests | Per-A request counter increase |
+| --- | --- | --- | --- |
+| Initial 2A2F | — | 16/16 | 8, 8 |
+| F shrink to 2A1F | 18.509 s | 16/16 | 8, 8 |
+| A expand to 3A1F | 42.704 s | 16/16 | 6, 5, 5 |
+| A shrink to 2A1F | 12.376 s | 16/16 | 8, 8 |
+| F expand to 2A2F | 25.664 s | 16/16 | 8, 8 |
+
+Each stage sent 16 concurrent fixed requests using the same prompt and
+parameters as the eager A test. All **80** returned HTTP 200 and **64**
+generated tokens. The new A (container PID 2394193) completed five requests.
+The four resize calls returned HTTP 200 and scaling status became false.
+These times include reconstruction and capture; they are single-run HTTP
+observations, not performance benchmarks or isolated pause measurements.
+
+The test-only `graph_probe.GraphProbe` was loaded through the official
+`--worker-extension-cls` option. It wrapped successful CUDAGraph capture,
+replay and reset calls and observed graph GC using weak references, without
+editing remote product/vLLM sources. Evidence established:
+
+- Every live A executed actual `CUDAGraph.replay()` inside `execute_model`
+  with scheduled request tokens at each stage. A thread-local scope excluded
+  nested `_dummy_run` calls, so idle DP participation did not count as real
+  request replay.
+- Every live F executed graph replay during each request window. F metadata
+  does not independently identify real versus dummy tokens; this is combined
+  with A replay and completed-request evidence, not a separate token-origin
+  claim for F.
+- Every live worker held captured graphs before inference. Every retained
+  worker reset or garbage-collected all old live graphs before its first
+  new capture after each resize. Removed actors were verified DEAD and their
+  placement groups REMOVED; interpreter exit was not counted as graph GC.
+- F resizing retained both A actor IDs/PIDs and placement groups; A resizing
+  retained F identity and placement. Expansion created new actors/groups,
+  and model placement counts matched every target topology.
+
+A conservative monitor sampled **all compute-process memory** on the four
+selected GPUs, including loading/capture/resizing. Physical memory was
+97,871 MiB per card, so the limit was **48,935.5 MiB** per card. Across
+164 samples (actual intervals 1.136–2.659 s), observed peaks were:
+
+| GPU | Sampled peak MiB |
+| --- | --- |
+| 4 | 6,568 |
+| 5 | 6,568 |
+| 6 | 34,008 |
+| 7 | 19,968 |
+
+The maximum was **33.21 GiB / 34.75% of physical memory**, below the
+47.79 GiB half-card allowance. No guard violation occurred. Summing all
+selected-card compute processes conservatively bounds task usage at the
+sampled times; this is not exact NVML host-PID/container-PID attribution,
+an allocator quota, or a measurement of sub-sample transient peaks.
+
+All five stage assertions passed. Task-owned processes were removed and
+independently checked absent. The four cards returned to their original
+20/18/18/20 MiB baseline; ports 6180–6239 were verified bindable. Raw results
+remain in the sibling `afd_agent`
+project's `work/elastic-graph-20260922/artifacts/graph001/output/`, with
+the executed case in `skills/test-service/cases/elastic-graph-smoke/` and
+report `reports/ELASTIC-GRAPH-2026-09-22.md` committed as `552d08f` in that
+validation repository.
+
+This qualifies one bounded four-GPU cycle. It does not establish replay of
+every captured size, compilation mode 3, model accuracy, resizing under
+concurrent traffic, long-running stability or NPU graph elasticity.
+
 ## Unverified / not implemented
 
-- The complete mixed A/F chain in one service lifetime.
+- The larger six-GPU mixed A/F chain and same-topology STOP/restart.
 - Long-running repeated resizing, concurrent-traffic drain and F expert coverage.
-- Accuracy, peak memory, communication-group leak checks and exact pause duration.
-- CUDA graph capture/replay after role changes.
+- Accuracy, sub-sample memory peaks, communication-group leak checks and exact
+  pause duration.
+- Other CUDA graph capture sizes and compilation mode 3.
 - NPU EEP stateless HCCL qualification and NPU elastic implementation.
 
 The required hardware sequence and candidate launch are in
