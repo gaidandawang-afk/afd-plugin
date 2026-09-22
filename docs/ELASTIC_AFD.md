@@ -99,6 +99,31 @@ Do not set `--enable-eplb`. The plugin narrowly exempts its explicit attention
 worker from EPLB and async-EPLB/NIXL prerequisites; native EEP keeps its checks.
 The AFD rendezvous host and ports are distributed from F0's actual node.
 
+### CUDA graph configuration
+
+For decode CUDA graphs, remove `--enforce-eager` and use:
+
+```bash
+--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16]}' \
+--max-cudagraph-capture-size 16 --max-num-seqs 16
+```
+
+Compilation mode 0 disables `torch.compile`; it still installs the native
+full CUDA graph wrapper. Prefill remains eager. The plugin rejects other
+CUDA graph modes and rejects compilation mode 1 (`STOCK_TORCH_COMPILE`) for
+elastic graphs: vLLM 0.26's MRV1 loader returns before installing the A graph
+wrapper in that mode. Compilation mode 3 is accepted by configuration, but
+needs separate hardware qualification.
+
+Graph capture sizes and the explicit KV budget do not impose a total GPU
+memory limit. Leave room for weights, communication buffers, workspace and
+graph pools, including the F=1 topology's complete expert weights.
+
+Four GPUs can exercise both roles with
+`2A2F → 2A1F → 3A1F → 2A1F → 2A2F`. Start with F DP size 2, then request
+F=1, A=3, A=2 and F=2 through the same endpoint below. A DP size 3 is legal:
+A holds remote expert proxies, while F=1 retains all expert weights.
+
 Candidate scale chain, issuing the next call only after the preceding succeeds:
 
 ```bash
