@@ -11,7 +11,10 @@ new A ranks. Commit **03c87ad** passed the four-GPU mixed-role CUDA graph
 cycle **2A2F → 2A1F → 3A1F → 2A1F → 2A2F**, including real-request graph
 replay on every A at each stage. Commit **652f661** passed the same mixed-role
 cycle with **eager DBO**, real two-ubatch prefill/decode on every A and
-low-traffic fallback at every topology. Accuracy qualification remains pending.
+low-traffic fallback at every topology. Commit **665cd0a** passed that cycle
+with **DBO + FULL_DECODE_ONLY CUDA graphs**, including scheduled-request
+dual-ubatch graph replay and old-graph retirement before recapture. Accuracy
+qualification remains pending.
 
 ## Implemented flow
 
@@ -47,8 +50,9 @@ in-place expert reload, or hard-coded graph pools.
 GPU only, `P2pNcclAFDConnector`, MRV1, A DP >= 2, F DP >= 1, A ranks >= F
 ranks, TP=PP=PCP=DCP=1. Existing GPU non-divisible mappings are retained.
 One API process and internal load balancing are required. Specify Ray DP and
-the `uni` role executor separately. Native two-ubatch DBO requires both
-`--enable-dbo` and `--enforce-eager`; elastic DBO with graphs is still rejected.
+the `uni` role executor separately. Native two-ubatch DBO supports eager and
+`FULL_DECODE_ONLY` CUDA graphs with `--enable-dbo`. Standalone ubatching
+without DBO remains outside this elastic configuration.
 Speculative decoding, LoRA, sleep, KV transfer and KV retention are outside
 this build. KV memory is fixed
 explicitly. Model/precision qualification starts with DeepSeek-V2-Lite.
@@ -131,6 +135,19 @@ CUDA graph modes and rejects compilation mode 1 (`STOCK_TORCH_COMPILE`) for
 elastic graphs: vLLM 0.26's MRV1 loader returns before installing the A graph
 wrapper in that mode. Compilation mode 3 is accepted by configuration, but
 needs separate hardware qualification.
+
+To combine this configuration with DBO, add `--enable-dbo`. The hardware
+case used `--dbo-decode-token-threshold 2 --dbo-prefill-token-threshold 2`
+to trigger both stages with short prompts. During teardown, the Attention
+worker also clears `UBatchWrapper.cudagraphs`, which is outside the ordinary
+graph-wrapper registry. This is essential when F alone changes and A keeps
+its wrapper: the captured graph must not retain the old A/F communicator.
+The existing cross-role finish then recaptures against the new connector.
+This cycle required no process-global graph-pool replacement.
+
+See [ELASTIC_AFD_FEATURE_AUDIT.md](ELASTIC_AFD_FEATURE_AUDIT.md) for the
+comparison with upstream recipe defaults, supported features and remaining
+elastic qualification gaps.
 
 Graph capture sizes and the explicit KV budget do not impose a total GPU
 memory limit. Leave room for weights, communication buffers, workspace and

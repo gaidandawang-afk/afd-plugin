@@ -327,8 +327,70 @@ The sibling `afd_agent` repository contains the executed case at
 `skills/test-service/cases/elastic-dbo-smoke/`, report
 `reports/ELASTIC-DBO-2026-09-22.md`, and raw evidence at
 `work/elastic-dbo-20260922/artifacts/eager001/output/`.
-Elastic DBO with graphs remains rejected pending the separate graph lifecycle
-implementation and hardware qualification.
+At this eager-only milestone, DBO with graphs was still rejected. The next
+qualification below adds and verifies that lifecycle.
+
+## DBO + CUDA graph mixed-role cycle — 2026-09-22
+
+Product commit **665cd0a451f74a46fa869834d5854b6864403a85** removes the eager-only
+DBO guard and clears Attention's native `UBatchWrapper` graph cache before
+destroying A/F communicators. This cache is separate from the ordinary
+`CUDAGraphWrapper` registry, and the A wrapper survives an F-only resize.
+Two product files change by **7 added / 6 removed lines**. Existing two-slot
+workspace recreation, EEP states, role actors and STOP protocol remain intact.
+
+Run **elastic-dbo-graph-20260922.graph001.1790058262846438000** passed in one
+cold start, UTC **06:24:35–06:28:52**, exit0. H20 GPUs4–7, pinned vLLM0.26.0,
+torch2.11+cu130, Ray2.48, DeepSeek-V2-Lite-Chat BF16, MRV1, TP1, EP on/EPLB off.
+DBO thresholds2/2, `FULL_DECODE_ONLY`, compilation mode0, capture sizes
+[1,2,4,8,16], max sequences16, max batched tokens2048, max model length2048,
+explicit KV1GiB and memory utilization0.35. Async scheduling stayed enabled.
+
+| Stage | Scale HTTP seconds | Concurrent request increments per active A |
+| --- | ---: | --- |
+| Initial 2A2F | — | 8 / 8 |
+| F shrink: 2A1F | 19.718 | 8 / 8 |
+| A expand: 3A1F | 43.658 | 6 / 5 / 5 |
+| A shrink: 2A1F | 13.357 | 8 / 8 |
+| F expand: 2A2F | 26.592 | 8 / 8 |
+
+Every stage completed16 concurrent requests plus one subsequent low-traffic
+request: **85/85 HTTP200**, all64 completion tokens with the expected `Paris`
+answer prefix. Every live A, including new rank2, demonstrated eager prefill
+DBO and decode dual-ubatch graph replay within a real scheduled request.
+The test correlates the outer DBO cache's graph ID with a successful native
+CUDA replay event under request scope, excluding nested dummy runs. Each DBO
+graph has stages0/1, positive per-stage tokens and the current A DP size.
+This does not merely observe ordinary single-batch fallback graph replay.
+
+Each F demonstrated two-stage graph execution during the request window;
+F metadata does not independently distinguish real/dummy token origin.
+All retained workers retired every previously live graph before their first
+new capture. Per-topology low-traffic fallback, actor identity, new actors,
+removed actors and placement-group release/creation assertions all passed.
+The run did not exercise traffic during resize or replace the global graph
+pool. There was no allocator assertion in this tested configuration.
+
+Across172 conservative samples, all-compute-process memory peaks on GPUs4/5/6/7
+were **7334/7334/33744/19884MiB**. The maximum was32.95GiB, below the47.79GiB
+half-card allowance; no guard violation occurred. This is sampled protection,
+not an allocator quota. Owned cleanup and an independent process check both
+found no remaining run processes; GPUs returned to18MiB each, with no compute
+PID, and all ports6240–6299 were bindable.
+
+The targeted CPU suite now has **98 passed, 4 skipped**. The new lifecycle
+regression checks that a retained DBO wrapper releases the old graph before
+connector close; configuration tests cover graph DBO and the remaining mode
+and standalone-ubatch restrictions. Probe CPU checks cover request/dummy
+attribution, DBO graph identity, F replay, fallback and return/exception
+preservation. Ruff and `git diff --check` pass.
+
+Executed case: sibling `afd_agent/skills/test-service/cases/elastic-dbo-graph-smoke/`.
+Report: `afd_agent/reports/ELASTIC-DBO-GRAPH-2026-09-22.md`.
+Raw evidence: `afd_agent/work/elastic-dbo-graph-20260922/artifacts/graph001/output/`.
+This is one functional cycle, not full accuracy, performance, or repeated-cycle
+qualification. The recipe/feature comparison is in
+[ELASTIC_AFD_FEATURE_AUDIT.md](ELASTIC_AFD_FEATURE_AUDIT.md).
 
 ## Unverified / not implemented
 
@@ -337,7 +399,7 @@ implementation and hardware qualification.
 - Accuracy, sub-sample memory peaks, communication-group leak checks and exact
   pause duration.
 - Other CUDA graph capture sizes and compilation mode 3.
-- Elastic DBO with CUDA graphs; repeated-cycle DBO stability and accuracy.
+- Repeated-cycle DBO/graph stability and accuracy.
 - NPU EEP stateless HCCL qualification and NPU elastic implementation.
 
 The required hardware sequence and candidate launch are in
