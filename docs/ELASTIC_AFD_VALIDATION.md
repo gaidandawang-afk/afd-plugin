@@ -279,6 +279,57 @@ This qualifies one bounded four-GPU cycle. It does not establish replay of
 every captured size, compilation mode 3, model accuracy, resizing under
 concurrent traffic, long-running stability or NPU graph elasticity.
 
+## Eager DBO mixed-role cycle — 2026-09-22
+
+Product commit **652f661870ccccfb1a54445fc8cc6581721862ff** adds eager DBO
+configuration support and restores two workspace slots when EEP reloads A.
+It changes two product files: 8 added / 3 removed lines. The EEP state machine,
+role actors, STOP protocol and shared pause/reconnect sequence are unchanged.
+
+Run `elastic-dbo-20260922.eager001.1790048614112815500` passed on GPU 4–7,
+using the pinned vLLM 0.26 runtime, DeepSeek-V2-Lite-Chat BF16, TP1, Ray2.48,
+MRV1, explicit 1 GiB KV, max sequences16, max batched tokens2048 and memory
+utilization0.35. It enabled `--enforce-eager --enable-dbo` with decode and
+prefill token thresholds both2. Async scheduling remained enabled.
+
+| Stage | Scale HTTP seconds | Concurrent request increments per active A |
+| --- | ---: | --- |
+| Initial 2A2F | — | 8 / 8 |
+| F shrink: 2A1F | 19.182 | 8 / 8 |
+| A expand: 3A1F | 43.986 | 6 / 5 / 5 |
+| A shrink: 2A1F | 13.127 | 8 / 8 |
+| F expand: 2A2F | 24.781 | 8 / 8 |
+
+Each stage completed16 concurrent requests and one subsequent low-traffic
+request: **85/85 HTTP200**, all64 completion tokens, with the expected `Paris`
+answer prefix. These checks are a functional smoke test, not accuracy or
+performance qualification. There was no inference during resize.
+
+An official worker-extension probe recorded successful eager `_run_ubatches`
+inside real scheduled A requests, excluding nested dummy work. Every active A,
+including newly created rank2, recorded both prefill and decode with stages0/1,
+positive token counts, current DP size and no cached graphs. Every F completed
+two-stage forward during the request window. F metadata does not independently
+identify token origin. Each topology also passed a real-request single-batch
+fallback check. Actor/PG identity and release assertions passed for both roles.
+
+Across191 conservative samples, all-compute-process memory peaks on GPUs4/5/6/7
+were6700/6700/33270/19614MiB, below48935.5MiB per card. The guard is sampled
+protection, not an allocator quota. Cleanup left no task processes or GPU compute
+processes; the cards returned to18MiB each and ports6240–6299 were bindable.
+
+Targeted CPU checks: **95 passed, 4 skipped**, covering elastic configuration,
+worker lifecycle, compatibility validation, Attention runner and graph policy.
+Probe CPU checks verify request attribution, dummy exclusion and original
+return/exception behavior. Python lint/format and `git diff --check` pass.
+
+The sibling `afd_agent` repository contains the executed case at
+`skills/test-service/cases/elastic-dbo-smoke/`, report
+`reports/ELASTIC-DBO-2026-09-22.md`, and raw evidence at
+`work/elastic-dbo-20260922/artifacts/eager001/output/`.
+Elastic DBO with graphs remains rejected pending the separate graph lifecycle
+implementation and hardware qualification.
+
 ## Unverified / not implemented
 
 - The larger six-GPU mixed A/F chain and same-topology STOP/restart.
@@ -286,6 +337,7 @@ concurrent traffic, long-running stability or NPU graph elasticity.
 - Accuracy, sub-sample memory peaks, communication-group leak checks and exact
   pause duration.
 - Other CUDA graph capture sizes and compilation mode 3.
+- Elastic DBO with CUDA graphs; repeated-cycle DBO stability and accuracy.
 - NPU EEP stateless HCCL qualification and NPU elastic implementation.
 
 The required hardware sequence and candidate launch are in

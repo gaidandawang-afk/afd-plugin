@@ -9,7 +9,9 @@ with real completions at all three stages. Commit **130346b** also passed
 **4A2F → 2A2F → 4A2F A-only resizing**, including requests completed by the
 new A ranks. Commit **03c87ad** passed the four-GPU mixed-role CUDA graph
 cycle **2A2F → 2A1F → 3A1F → 2A1F → 2A2F**, including real-request graph
-replay on every A at each stage. Accuracy qualification remains pending.
+replay on every A at each stage. Commit **652f661** passed the same mixed-role
+cycle with **eager DBO**, real two-ubatch prefill/decode on every A and
+low-traffic fallback at every topology. Accuracy qualification remains pending.
 
 ## Implemented flow
 
@@ -45,8 +47,10 @@ in-place expert reload, or hard-coded graph pools.
 GPU only, `P2pNcclAFDConnector`, MRV1, A DP >= 2, F DP >= 1, A ranks >= F
 ranks, TP=PP=PCP=DCP=1. Existing GPU non-divisible mappings are retained.
 One API process and internal load balancing are required. Specify Ray DP and
-the `uni` role executor separately. DBO, speculative decoding, LoRA, sleep,
-KV transfer and KV retention are outside this build. KV memory is fixed
+the `uni` role executor separately. Native two-ubatch DBO requires both
+`--enable-dbo` and `--enforce-eager`; elastic DBO with graphs is still rejected.
+Speculative decoding, LoRA, sleep, KV transfer and KV retention are outside
+this build. KV memory is fixed
 explicitly. Model/precision qualification starts with DeepSeek-V2-Lite.
 
 Initial eager 2A1F inference, separate eager A/F shrink/expand cycles and
@@ -101,6 +105,16 @@ Allow room for the largest tested topology, communication buffers and captures.
 Do not set `--enable-eplb`. The plugin narrowly exempts its explicit attention
 worker from EPLB and async-EPLB/NIXL prerequisites; native EEP keeps its checks.
 The AFD rendezvous host and ports are distributed from F0's actual node.
+
+### Eager DBO configuration
+
+Keep `--enforce-eager` and add `--enable-dbo`. The usual
+`--dbo-decode-token-threshold` and `--dbo-prefill-token-threshold` flags still
+control whether each batch is split. Low-token batches can fall back to a
+single batch. Retained A workers recreate two workspace slots when EEP reloads
+their model runner. The existing drain, DP pause and F STOP/join sequence
+provides the boundary before replacing communication groups; no additional
+DBO actor or scaling state machine is introduced.
 
 ### CUDA graph configuration
 
