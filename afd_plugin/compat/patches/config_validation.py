@@ -11,6 +11,7 @@ worker when ``worker_cls`` was left as ``"auto"``.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,11 @@ import vllm.engine.arg_utils as arg_utils_module
 
 from afd_plugin.compat.vllm import TARGET_VLLM_VERSION
 from afd_plugin.config import parse_optional_afd_config
+from afd_plugin.elastic.config import (
+    is_elastic_attention,
+    is_elastic_attention_worker,
+    validate_elastic_config,
+)
 from afd_plugin.validation import afd_worker_qualname_for_platform_default
 
 if TYPE_CHECKING:
@@ -105,6 +111,19 @@ def create_engine_config(
 
         apply_afd_async_dp_engine_patch_if_needed(config)
     # ### PATCH END: AFD Ascend async-DP patch ordering
+    # ### PATCH START: validate the complete elastic role config before spawning.
+    if is_elastic_attention_worker(config.parallel_config):
+        if not is_elastic_attention(config):
+            raise ValueError(
+                "Elastic AFD worker requires additional_config.afd attention"
+            )
+        validate_elastic_config(config)
+        plugins = {
+            name.strip() for name in os.environ.get("VLLM_PLUGINS", "").split(",")
+        }
+        if "afd_elastic" not in plugins:
+            raise ValueError("Elastic AFD requires VLLM_PLUGINS to include afd_elastic")
+    # ### PATCH END: validate the complete elastic role config before spawning.
     return config
 
 
