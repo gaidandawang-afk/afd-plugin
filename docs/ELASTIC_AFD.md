@@ -1,5 +1,10 @@
 # Elastic AFD development build
 
+For the complete requirements, architecture, interface contracts, lifecycle,
+failure semantics and acceptance/review checklist, start with
+[EAFD 软件需求与设计规格说明书](EAFD_SOFTWARE_DESIGN.md).
+This file remains the shorter implementation and launch guide.
+
 This implements the GPU TP=1 path of the EEP-reuse design against vLLM
 **0.26.0 / 568afb3a13806beb53bb2e6bd518269357b237c0** and afd-plugin
 **8bb14be66d9f940b1b132b141d986214c0210353**. CPU tests and source review pass.
